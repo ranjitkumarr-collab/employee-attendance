@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Capture Attendance Selfie</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 18px; background: #f5f6f7; color: #202124;
+      font-family: Arial, sans-serif; }
+    main { max-width: 520px; margin: 0 auto; padding: 22px; background: white;
+      border: 1px solid #e0e0e0; border-radius: 18px; }
+    h1 { margin: 0 0 8px; font-size: 24px; }
+    p { color: #5f6368; line-height: 1.45; }
+    video { display: block; width: 100%; max-height: 58vh; margin: 14px 0;
+      background: #222; border-radius: 14px; object-fit: cover; }
+    button { width: 100%; margin-top: 12px; padding: 15px; border: 0;
+      border-radius: 999px; background: #168545; color: white; font-size: 16px;
+      font-weight: 700; cursor: pointer; }
+    button:disabled { background: #c7c9cc; cursor: not-allowed; }
+    #status { min-height: 42px; font-size: 14px; }
+    .small { font-size: 12px; color: #70757a; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Attendance selfie</h1>
+    <p>Allow camera and location access. Your front camera selfie and current GPS location will be sent to the attendance form.</p>
+    <button id="enableButton" type="button">ENABLE CAMERA & LOCATION</button>
+    <video id="video" autoplay playsinline muted></video>
+    <button id="captureButton" type="button" disabled>CAPTURE SELFIE & SUBMIT</button>
+    <p id="status" role="status" aria-live="polite">Camera and GPS permission are required.</p>
+    <p class="small">Please keep this page open until you see the submission confirmation.</p>
+  </main>
+
+  <script>
+    const enableButton = document.getElementById('enableButton');
+    const captureButton = document.getElementById('captureButton');
+    const video = document.getElementById('video');
+    const statusText = document.getElementById('status');
+    let cameraStream = null;
+    let currentPosition = null;
+
+    function getLocation() {
+      return new Promise(function (resolve, reject) {
+        if (!navigator.geolocation) {
+          reject(new Error('Location is not supported by this browser.'));
+          return;
+        }
+        navigator.geolocation.getCurrentPosition(
+          function (position) { resolve(position); },
+          function (error) {
+            const messages = {
+              1: 'Location permission was denied. Allow location access in your browser settings.',
+              2: 'Current location is unavailable. Turn on phone location/GPS and try again.',
+              3: 'Location request timed out. Try again in an open area.'
+            };
+            reject(new Error(messages[error.code] || 'Could not get your location.'));
+          },
+          { enableHighAccuracy: true, timeout: 25000, maximumAge: 0 }
+        );
+      });
+    }
+
+    async function enableCapture() {
+      enableButton.disabled = true;
+      statusText.textContent = 'Requesting camera and GPS permissions...';
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error('Camera access is not available. Open this page in an up-to-date browser over HTTPS.');
+        }
+        const cameraPromise = navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'user' }, width: { ideal: 640 }, height: { ideal: 480 } },
+          audio: false
+        });
+        const locationPromise = getLocation();
+        const results = await Promise.allSettled([cameraPromise, locationPromise]);
+
+        if (results[0].status === 'fulfilled') {
+          cameraStream = results[0].value;
+          video.srcObject = cameraStream;
+          await video.play();
+        }
+        if (results[1].status === 'fulfilled') {
+          currentPosition = results[1].value;
+        }
+
+        if (!cameraStream || !currentPosition) {
+          const errors = [];
+          if (!cameraStream) errors.push(results[0].reason ? results[0].reason.message : 'Camera permission is needed.');
+          if (!currentPosition) errors.push(results[1].reason ? results[1].reason.message : 'GPS permission is needed.');
+          throw new Error(errors.join(' '));
+        }
+
+        statusText.textContent = 'Camera ready. GPS captured (accuracy approximately ' +
+          Math.round(currentPosition.coords.accuracy) + ' metres). Take your selfie.';
+        captureButton.disabled = false;
+        enableButton.textContent = 'CAMERA & LOCATION READY';
+      } catch (error) {
+        statusText.textContent = error.message || 'Unable to start camera/location.';
+        enableButton.disabled = false;
+        if (cameraStream && !currentPosition) {
+          cameraStream.getTracks().forEach(function (track) { track.stop(); });
+          cameraStream = null;
+          video.srcObject = null;
+        }
+      }
+    }
+
+    function captureAndSend() {
+      if (!cameraStream || !currentPosition || !video.videoWidth) {
+        statusText.textContent = 'Please enable camera and location first.';
+        return;
+      }
+      if (!window.opener || window.opener.closed) {
+        statusText.textContent = 'The attendance form is no longer open. Close this tab and reopen attendance.';
+        return;
+      }
+
+      captureButton.disabled = true;
+      enableButton.disabled = true;
+      statusText.textContent = 'Preparing selfie and submitting...';
+
+      const maxSide = 640;
+      const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(video.videoWidth * scale);
+      canvas.height = Math.round(video.videoHeight * scale);
+      const context = canvas.getContext('2d');
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const selfieDataUrl = canvas.toDataURL('image/jpeg', 0.68);
+
+      const message = {
+        type: 'ATTENDANCE_CAPTURE',
+        latitude: currentPosition.coords.latitude,
+        longitude: currentPosition.coords.longitude,
+        accuracy: currentPosition.coords.accuracy,
+        selfieDataUrl: selfieDataUrl
+      };
+
+      try {
+        // The parent checks this page's exact origin before accepting the data.
+        window.opener.postMessage(message, '*');
+        statusText.textContent = 'Selfie and location sent. Return to the attendance page.';
+        if (cameraStream) cameraStream.getTracks().forEach(function (track) { track.stop(); });
+        window.setTimeout(function () { window.close(); }, 1200);
+      } catch (error) {
+        statusText.textContent = 'Could not return the selfie to the attendance form. Please reopen the form and try again.';
+        captureButton.disabled = false;
+        enableButton.disabled = false;
+      }
+    }
+
+    enableButton.addEventListener('click', enableCapture);
+    captureButton.addEventListener('click', captureAndSend);
+  </script>
+</body>
+</html>
